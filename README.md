@@ -12,6 +12,10 @@ Bienvenidos al repositorio público del **Curso de Terraform / Infraestructura c
    1.3. [Azure DevOps](#13-azure-devops)  
    1.4. [Terraform](#14-terraform)  
 
+2. **Despliegue**  
+   2.1. [Cambiar origen al proyecto clonado (terraform-core / terraform-demo / app-demo)](#21-cambiar-origen-al-proyecto-clonado-terraform-core--terraform-demo--app-demo)  
+   2.2. [Creación de App Registration](#22-creacion-de-app-registration)  
+   2.3. [Configuración de Service Principal y permisos](#23-configuracion-de-service-principal-y-permisos)  
 ---
 
 ## 1. Ambiente
@@ -307,3 +311,167 @@ Después de unos segundos, verás que el Resource Group `rg-terraform-ejemplo` s
 ---
 
 > **Siguiente Paso:** Con estos cuatro subtemas (WSL, Git, Azure DevOps y Terraform) ya tienes tu ambiente totalmente preparado. En las siguientes secciones del curso profundizaremos en la escritura de código Terraform, creación de módulos, pipelines y buenas prácticas.
+
+---
+
+## 2. Automatización
+
+En este módulo veremos cómo preparar los recursos en Azure y Git para que todo el flujo (clonar repos, registrar la aplicación, asignar permisos y configurar el pipeline) se ejecute de forma completamente automatizada por CI/CD.
+
+### 2.1 Cambiar origen al proyecto clonado (terraform-core / terraform-demo / app-demo)
+
+Si ya tienes un repositorio local (o uno clonado en tu máquina) y quieres apuntar tu carpeta al repositorio remoto correcto (por ejemplo, `terraform-core`, `terraform-demo` o `app-demo`), sigue estos pasos.
+
+1. **Clonar primero (si aún no está clonado)**  
+   ```bash
+   # Ejemplo: clonar terraform-core
+   git clone git@github.com:adonisvillalva/iac_course.git
+   cd terraform-core
+   ```
+
+2. **Verificar el origen actual**  
+   ```bash
+   git remote -v
+   # origin  https://dev.azure.com/<ORGANIZACION>/terraform-core/_git/terraform-core (fetch)
+   # origin  https://dev.azure.com/<ORGANIZACION>/terraform-core/_git/terraform-core (push)
+   ```
+
+3. **Cambiar el origen si necesitas apuntar a otro proyecto**  
+   Imaginemos que quieres apuntar a `terraform-demo` en lugar de `terraform-core`:
+   ```bash
+   git remote set-url origin https://dev.azure.com/<ORGANIZACION>/terraform-demo/_git/terraform-demo
+   ```
+
+4. **Verificar el cambio**  
+   ```bash
+   git remote -v
+   # origin  https://dev.azure.com/<ORGANIZACION>/terraform-demo/_git/terraform-demo (fetch)
+   # origin  https://dev.azure.com/<ORGANIZACION>/terraform-demo/_git/terraform-demo (push)
+   ```
+
+5. **Confirmar que tu rama local apunta al remoto correcto**  
+   Por lo general, la rama `main` o `master` ya está configurada. Para verificar:
+   ```bash
+   git branch -vv
+   # * main  abc1234 [origin/main] Mensaje del último commit
+   ```
+   Si necesitas hacer push/pull:
+   ```bash
+   git push origin main
+   git pull origin main
+   ```
+
+> Repite estos pasos en cada carpeta de proyecto (`terraform-core`, `terraform-demo`, `app-demo`), según corresponda.
+
+---
+
+### 2.2 Creación de App Registration
+
+Para que CI/CD pueda ejecutar comandos contra Azure (crear recursos, desplegar, etc.), necesitaremos un Service Principal asociado a una App Registration en Azure AD. A continuación, los pasos para hacerlo vía Azure CLI y cómo capturar sus credenciales.
+
+1. **Iniciar sesión en Azure CLI**  
+   ```bash
+   az login
+   az account set --subscription "<TU_SUBSCRIPTION_ID>"
+   ```
+
+2. **Crear App Registration (Service Principal)**  
+   ```bash
+   az ad app create      --display-name "ci-cd-terraform-app"      --identifier-uris "http://ci-cd-terraform-app"      --query appId -o tsv
+   ```
+   - Este comando devuelve el `appId` (Client ID) de la App Registration recién creada. Guárdalo como `CLIENT_ID`.
+
+3. **Crear Service Principal y asignar credencial**  
+   ```bash
+   az ad sp create-for-rbac      --name http://ci-cd-terraform-app      --role Contributor      --scopes /subscriptions/<TU_SUBSCRIPTION_ID>      --sdk-auth
+   ```
+   - Esto creará un Service Principal y desplegará un JSON similar a:
+     ```json
+     {
+       "clientId": "<CLIENT_ID>",
+       "clientSecret": "<CLIENT_SECRET>",
+       "subscriptionId": "<TU_SUBSCRIPTION_ID>",
+       "tenantId": "<TENANT_ID>",
+       "activeDirectoryEndpointUrl": "https://login.microsoftonline.com",
+       "resourceManagerEndpointUrl": "https://management.azure.com/",
+       "activeDirectoryGraphResourceId": "https://graph.windows.net/",
+       "sqlManagementEndpointUrl": "https://management.core.windows.net:8443/",
+       "galleryEndpointUrl": "https://gallery.azure.com/",
+       "managementEndpointUrl": "https://management.core.windows.net/"
+     }
+     ```
+   - Copia y guarda ese JSON completo en un lugar seguro; más adelante lo usaremos como un Service Connection en Azure DevOps.
+
+4. **Verificar la existencia del Service Principal**  
+   ```bash
+   az ad sp show --id <CLIENT_ID>
+   ```
+   - Deberías ver detalles del SP confirmando que existe y tiene el rol “Contributor” sobre tu suscripción.
+
+---
+
+### 2.3 Configuración de Service Principal y permisos
+
+Aunque en el paso anterior otorgamos el rol `Contributor` a nivel de suscripción, en ambientes de producción se recomienda aplicar el principio de mínimos privilegios. Aquí un ejemplo de cómo restringir permisos a un Resource Group específico.
+
+1. **Crear un Resource Group dedicado para CI/CD (opcional)**  
+   ```bash
+   az group create      --name RG-CIDemo      --location eastus
+   ```
+
+2. **Asignar rol “Contributor” al Service Principal solo sobre ese Resource Group**  
+   ```bash
+   az role assignment create      --assignee <CLIENT_ID>      --role "Contributor"      --resource-group RG-CIDemo
+   ```
+
+3. **(Opcional) Si sólo necesitas que Terraform cree recursos mínimos (por ejemplo, solo lectura en RGs de producción y creación en RG demo), asigna roles específicos**  
+   ```bash
+   # Ejemplo: lectora de Resource Group de producción
+   az role assignment create      --assignee <CLIENT_ID>      --role "Reader"      --resource-group RG-Production
+
+   # Ejemplo: contribuyente en RG de pruebas
+   az role assignment create      --assignee <CLIENT_ID>      --role "Contributor"      --resource-group RG-Staging
+   ```
+
+4. **Validar roles asignados al SP**  
+   ```bash
+   az role assignment list      --assignee <CLIENT_ID>      --query "[].{Scope:scope,Role:roleDefinitionName}"      -o table
+   ```
+
+> Asegúrate de tener a mano:  
+> - `CLIENT_ID`  
+> - `CLIENT_SECRET`  
+> - `TENANT_ID`  
+> - `SUBSCRIPTION_ID`  
+
+> Más adelante, estos valores se guardarán como variables seguras en Azure DevOps.
+
+---
+
+### 2.4 Configuración de pipeline CI/CD
+
+Con el Service Principal creado y los repositorios apuntando correctamente, ya podemos armar el pipeline que construirá, validará y desplegará Terraform + aplicación (o Infrastructure) mediante Azure DevOps.
+
+#### 2.4.1 Variables y Service Connection en Azure DevOps
+
+1. **Service Connection**  
+   - Entra a tu proyecto de Azure DevOps → **Project Settings → Service connections**.  
+   - Haz clic en **New service connection → Azure Resource Manager**.  
+   - Elige “Service principal (manual)” y pega el JSON obtenido en el paso anterior (incluyendo `clientId`, `clientSecret`, `tenantId`, `subscriptionId`).  
+   - Asigna un nombre descriptivo: por ejemplo, `SC-CI-CD-Terraform`.  
+   - Concede permisos “Contributor” o el rol mínimo que definiste.  
+
+2. **Variable Group**  
+   - Ve a **Pipelines → Library → Variable groups → + Variable group**.  
+   - Nombre: `vars-automatizacion`.  
+   - Agrega variables (marcar "Keep this value secret" en las sensibles):
+     - `tenantId` = `<TENANT_ID>`
+     - `subscriptionId` = `<SUBSCRIPTION_ID>`
+     - `clientId` = `<CLIENT_ID>`
+     - `clientSecret` = `<CLIENT_SECRET>`
+     - `resourceGroup` = `RG-CIDemo`  
+     - (Opcional) `location` = `eastus`  
+     - (Opcional) `storageAccountName` = `stterraformstate`  
+     - (Opcional) `containerName` = `tfstate`  
+
+   - Guarda el grupo.

@@ -1,0 +1,17 @@
+{
+  "if": {
+    "allOf": [
+      {
+        "field": "location",
+        "notEquals": "[parameters('allowedLocation')]"
+      },
+      {
+        "field": "type",
+        "notIn": "[parameters('excludedResourceTypes')]"
+      }
+    ]
+  },
+  "then": {
+    "effect": "deny"
+  }
+}
